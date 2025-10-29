@@ -1,6 +1,6 @@
 """
-Document Processor - Complete Pipeline
-Orchestrates: Loading -> Preprocessing -> Chunking
+Document Processor - Complete Pipeline - Phase 3
+Orchestrates: Loading -> Preprocessing -> Chunking -> Embeddings -> Vector Storage
 """
 from typing import List, Dict, Optional
 from dataclasses import dataclass, asdict
@@ -8,11 +8,9 @@ import logging
 from pathlib import Path
 import hashlib
 import json
+import numpy as np
 
-# Import our previous modules
-# In real project: from app.rag.document_loader import DocumentLoader, Document
-# For now, we'll assume they're in the same package
-
+# Import our modules
 logger = logging.getLogger(__name__)
 
 
@@ -26,31 +24,37 @@ class ProcessedDocument:
     chunks: List[Dict]  # List of chunk dictionaries
     metadata: Dict
     processing_stats: Dict
+    embeddings_generated: bool = False  # Phase 3: Track if embeddings are generated
 
 
 class DocumentProcessor:
     """
-    Orchestrates the complete document processing pipeline
+    Orchestrates the complete document processing pipeline - Phase 3
     
-    Flow: Upload -> Load -> Preprocess -> Chunk -> Store
+    Flow: Upload -> Load -> Preprocess -> Chunk -> Embed -> Vector Store
     """
     
     def __init__(
         self,
         chunk_size: int = 1000,
         chunk_overlap: int = 200,
-        preserve_sanskrit: bool = True
+        preserve_sanskrit: bool = True,
+        use_vector_store: bool = True,
+        embedding_model: str = 'all-MiniLM-L6-v2',
+        vector_store_path: str = './data/chroma_db'
     ):
         """
-        Initialize document processor with all components
+        Initialize document processor with all components (Phase 3)
         
         Args:
             chunk_size: Target chunk size in characters
             chunk_overlap: Overlap between chunks
             preserve_sanskrit: Whether to preserve Sanskrit diacritics
+            use_vector_store: Enable Phase 3 vector features
+            embedding_model: Model for embeddings
+            vector_store_path: Path for ChromaDB storage
         """
-        # Initialize our components
-        # Note: In real code, import these from their modules
+        # Import components
         from app.rag.text_preprocessor import TextPreprocessor
         from app.rag.text_chunker import TextChunker
         from app.rag.document_loader import DocumentLoader
@@ -62,8 +66,40 @@ class DocumentProcessor:
             chunk_overlap=chunk_overlap
         )
         
-        # In-memory storage for processed documents
-        # Later we'll replace this with vector DB
+        # Phase 3: Initialize embeddings and vector store
+        self.use_vector_store = use_vector_store
+        
+        if use_vector_store:
+            try:
+                from app.rag.embeddings import EmbeddingGenerator
+                from app.rag.vector_store import VectorStore
+                
+                self.embedding_generator = EmbeddingGenerator(
+                    model_name=embedding_model
+                )
+                
+                self.vector_store = VectorStore(
+                    collection_name='ayurvedic_documents',
+                    persist_directory=vector_store_path,
+                    embedding_dimension=self.embedding_generator.dimension
+                )
+                
+                logger.info("Phase 3 features enabled: Embeddings + Vector Store")
+                
+            except Exception as e:
+                logger.warning(
+                    f"Failed to initialize Phase 3 features: {str(e)}"
+                    "\nFalling back to Phase 2 (keyword search)"
+                )
+                self.use_vector_store = False
+                self.embedding_generator = None
+                self.vector_store = None
+        else:
+            self.embedding_generator = None
+            self.vector_store = None
+            logger.info("Phase 2 mode: Keyword search only")
+        
+        # In-memory storage for document metadata
         self.documents: Dict[str, ProcessedDocument] = {}
         
         logger.info("DocumentProcessor initialized")
@@ -149,7 +185,61 @@ class DocumentProcessor:
                 'pages_processed': len(documents)
             }
             
-            # Step 7: Create final processed document
+            # Step 7: Phase 3 - Generate embeddings and store in vector DB
+            embeddings_generated = False
+            
+            if self.use_vector_store and self.embedding_generator:
+                logger.info("Step 7: Generating embeddings...")
+                
+                try:
+                    # Extract chunk texts for embedding
+                    chunk_texts = [chunk['content'] for chunk in chunks_dict]
+                    
+                    # Generate embeddings for all chunks
+                    embeddings = self.embedding_generator.encode_documents(
+                        chunk_texts,
+                        batch_size=32,
+                        show_progress=False
+                    )
+                    
+                    # Prepare metadata for vector store
+                    vector_metadatas = []
+                    vector_ids = []
+                    
+                    for i, chunk in enumerate(chunks_dict):
+                        # Create unique ID for each chunk
+                        chunk_id = f"{doc_id}_chunk_{i}"
+                        vector_ids.append(chunk_id)
+                        
+                        # Prepare metadata (flatten nested structures)
+                        meta = {
+                            'doc_id': doc_id,
+                            'filename': filename,
+                            'chunk_index': chunk['chunk_index'],
+                            'token_count': chunk['token_count'],
+                            'start_char': chunk['start_char'],
+                            'end_char': chunk['end_char']
+                        }
+                        vector_metadatas.append(meta)
+                    
+                    # Add to vector store
+                    self.vector_store.add_documents(
+                        embeddings=embeddings,
+                        documents=chunk_texts,
+                        metadatas=vector_metadatas,
+                        ids=vector_ids
+                    )
+                    
+                    embeddings_generated = True
+                    logger.info(
+                        f"Successfully generated and stored {len(embeddings)} embeddings"
+                    )
+                    
+                except Exception as e:
+                    logger.error(f"Error generating embeddings: {str(e)}")
+                    logger.warning("Document processed but embeddings failed")
+            
+            # Step 8: Create final processed document
             processed_doc = ProcessedDocument(
                 id=doc_id,
                 filename=filename,
@@ -157,13 +247,17 @@ class DocumentProcessor:
                 original_text=combined_text,
                 chunks=chunks_dict,
                 metadata=combined_metadata,
-                processing_stats=processing_stats
+                processing_stats=processing_stats,
+                embeddings_generated=embeddings_generated
             )
             
-            # Store in memory (later: store in vector DB)
+            # Store metadata in memory
             self.documents[doc_id] = processed_doc
             
-            logger.info(f"Processing complete: {len(chunks_dict)} chunks created")
+            logger.info(
+                f"Processing complete: {len(chunks_dict)} chunks created"
+                f"{' with embeddings' if embeddings_generated else ''}"
+            )
             return processed_doc
             
         except Exception as e:
@@ -202,8 +296,17 @@ class DocumentProcessor:
         return summaries
     
     def delete_document(self, doc_id: str) -> bool:
-        """Delete a document"""
+        """Delete a document and its embeddings"""
         if doc_id in self.documents:
+            # Delete from vector store if Phase 3 enabled
+            if self.use_vector_store and self.vector_store:
+                try:
+                    self.vector_store.delete_by_metadata({'doc_id': doc_id})
+                    logger.info(f"Deleted embeddings for: {doc_id}")
+                except Exception as e:
+                    logger.warning(f"Error deleting embeddings: {str(e)}")
+            
+            # Delete from memory
             del self.documents[doc_id]
             logger.info(f"Deleted document: {doc_id}")
             return True
@@ -212,18 +315,83 @@ class DocumentProcessor:
     def search_chunks(
         self,
         query: str,
-        top_k: int = 5
+        top_k: int = 5,
+        use_semantic: bool = True
     ) -> List[Dict]:
         """
-        Simple keyword search across all chunks
-        (Later: replace with vector similarity search)
+        Search across all chunks - Phase 3 uses semantic search!
         
         Args:
             query: Search query
             top_k: Number of results to return
+            use_semantic: Use semantic search (Phase 3) vs keyword (Phase 2)
             
         Returns:
             List of matching chunks with scores
+        """
+        # Phase 3: Semantic search with embeddings
+        if use_semantic and self.use_vector_store and self.embedding_generator:
+            return self._semantic_search(query, top_k)
+        
+        # Phase 2: Fallback to keyword search
+        return self._keyword_search(query, top_k)
+    
+    def _semantic_search(self, query: str, top_k: int) -> List[Dict]:
+        """
+        Semantic search using embeddings (Phase 3)
+        
+        Args:
+            query: Search query
+            top_k: Number of results
+            
+        Returns:
+            List of results with similarity scores
+        """
+        try:
+            # Generate query embedding
+            query_embedding = self.embedding_generator.encode_query(query)
+            
+            # Search vector store
+            results = self.vector_store.search(
+                query_embedding=query_embedding,
+                top_k=top_k
+            )
+            
+            # Format results
+            formatted_results = []
+            for result in results:
+                metadata = result['metadata']
+                doc_id = metadata.get('doc_id', 'unknown')
+                
+                formatted_results.append({
+                    'doc_id': doc_id,
+                    'filename': metadata.get('filename', 'unknown'),
+                    'chunk_index': metadata.get('chunk_index', 0),
+                    'content': result['content'],
+                    'score': result['similarity'],
+                    'distance': result['distance'],
+                    'metadata': metadata,
+                    'search_type': 'semantic'
+                })
+            
+            logger.info(f"Semantic search found {len(formatted_results)} results")
+            return formatted_results
+            
+        except Exception as e:
+            logger.error(f"Semantic search failed: {str(e)}")
+            logger.warning("Falling back to keyword search")
+            return self._keyword_search(query, top_k)
+    
+    def _keyword_search(self, query: str, top_k: int) -> List[Dict]:
+        """
+        Keyword-based search (Phase 2 fallback)
+        
+        Args:
+            query: Search query
+            top_k: Number of results
+            
+        Returns:
+            List of results with relevance scores
         """
         # Normalize query
         normalized_query = self.preprocessor.normalize_query(query)
@@ -252,7 +420,8 @@ class DocumentProcessor:
                         'chunk_index': chunk['chunk_index'],
                         'content': chunk['content'],
                         'score': score,
-                        'metadata': chunk['metadata']
+                        'metadata': chunk['metadata'],
+                        'search_type': 'keyword'
                     })
         
         # Sort by score and return top_k
@@ -260,9 +429,18 @@ class DocumentProcessor:
         return results[:top_k]
     
     def get_stats(self) -> Dict:
-        """Get overall statistics"""
+        """Get overall statistics (Phase 3 enhanced)"""
         if not self.documents:
-            return {'total_documents': 0}
+            base_stats = {
+                'total_documents': 0,
+                'phase': 3 if self.use_vector_store else 2
+            }
+            
+            # Add vector store stats if available
+            if self.use_vector_store and self.vector_store:
+                base_stats.update(self.vector_store.get_stats())
+            
+            return base_stats
         
         total_chunks = sum(len(doc.chunks) for doc in self.documents.values())
         total_chars = sum(len(doc.original_text) for doc in self.documents.values())
@@ -273,13 +451,32 @@ class DocumentProcessor:
             if doc.metadata.get('has_ayurvedic_content', False)
         )
         
-        return {
+        # Count documents with embeddings
+        docs_with_embeddings = sum(
+            1 for doc in self.documents.values()
+            if doc.embeddings_generated
+        )
+        
+        stats = {
+            'phase': 3 if self.use_vector_store else 2,
             'total_documents': len(self.documents),
             'total_chunks': total_chunks,
             'total_characters': total_chars,
             'ayurvedic_documents': ayurvedic_docs,
-            'avg_chunks_per_doc': total_chunks // len(self.documents)
+            'avg_chunks_per_doc': total_chunks // len(self.documents),
+            'documents_with_embeddings': docs_with_embeddings,
+            'embeddings_enabled': self.use_vector_store
         }
+        
+        # Add vector store stats if available
+        if self.use_vector_store and self.vector_store:
+            stats['vector_store'] = self.vector_store.get_stats()
+        
+        # Add embedding model info if available
+        if self.embedding_generator:
+            stats['embedding_model'] = self.embedding_generator.get_info()
+        
+        return stats
     
     def export_document(self, doc_id: str, format: str = 'json') -> str:
         """
