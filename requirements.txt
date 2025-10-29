@@ -1,0 +1,31 @@
+# Core Web Framework
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Data Validation (like Zod for TypeScript)
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# RAG & LLM Stack
+langchain==0.1.0
+langchain-community==0.0.10
+langchain-openai==0.0.2
+
+# Vector Database
+chromadb==0.4.18
+
+# Embeddings
+sentence-transformers==2.2.2
+
+# Document Processing
+pypdf==3.17.1
+python-docx==1.1.0
+
+# LLM APIs (choose one or both)
+openai==1.6.1
+anthropic==0.8.1
+
+# Utilities
+python-dotenv==1.0.0
+pypdf

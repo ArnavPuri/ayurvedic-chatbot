@@ -1,0 +1,65 @@
+# ===== Environment Variables =====
+.env
+.env.local
+.env.*.local
+*.env
+
+# Virtual Environments
+ayurenv/
+ayurenv/*
+venv/
+ENV/
+env/
+.venv/
+
+.DS_Store
+
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+# PyInstaller
+*.manifest
+*.spec
+
+# Document uploads (if storing locally)
+data/documents/*
+!data/documents/.gitkeep
+
+
+
+# Model cache (sentence-transformers, transformers)
+.cache/
+models/
+*.bin
+*.safetensors
+*.onnx
+*.pt
+*.pth
+
+# Hugging Face cache
+.huggingface/
+~/.cache/huggingface/
+
+# LangChain / LangSmith
+.langchain/
+.langsmith/
+
+
+# ===== Project Specific =====
+# FastAPI
+.pytest_cache/
+
+# API keys, secrets (redundant but explicit)
+secrets/
+*.key
+*.pem
+*.cert
